@@ -3051,6 +3051,51 @@ Caron Broadcasting, Inc., an Ohio corporation (“Lessee”).`)
       await loadingTask.destroy();
     });
 
+    it("gets page stats after rendering page with operator list, with `pdfBug` set", async function () {
+      const loadingTask = getDocument(
+        buildGetDocumentParams(basicApiFileName, { pdfBug: true })
+      );
+      const pdfDoc = await loadingTask.promise;
+      const pdfPage = await pdfDoc.getPage(1);
+      const viewport = pdfPage.getViewport({ scale: 1 });
+      expect(viewport instanceof PageViewport).toEqual(true);
+
+      const canvasAndCtx = CanvasFactory.create(
+        viewport.width,
+        viewport.height
+      );
+
+      var opList = await pdfPage.getOperatorList();
+
+      const renderTask = pdfPage.renderOperatorList({
+        canvasContext: canvasAndCtx.context,
+        viewport: viewport,
+        operatorList: opList
+      });
+
+      expect(renderTask instanceof RenderTask).toEqual(true);
+
+      await renderTask.promise;
+      expect(renderTask.separateAnnots).toEqual(false);
+
+      const { stats } = pdfPage;
+      expect(stats instanceof StatTimer).toEqual(true);
+      expect(stats.times.length).toEqual(3);
+
+      const [statEntryOne, statEntryTwo, statEntryThree] = stats.times;
+      expect(statEntryOne.name).toEqual("Page Request");
+      expect(statEntryOne.end - statEntryOne.start).toBeGreaterThanOrEqual(0);
+
+      expect(statEntryTwo.name).toEqual("Rendering");
+      expect(statEntryTwo.end - statEntryTwo.start).toBeGreaterThan(0);
+
+      expect(statEntryThree.name).toEqual("Overall");
+      expect(statEntryThree.end - statEntryThree.start).toBeGreaterThan(0);
+
+      CanvasFactory.destroy(canvasAndCtx);
+      await loadingTask.destroy();
+    });
+
     it("cancels rendering of page", async function () {
       const viewport = page.getViewport({ scale: 1 });
       expect(viewport instanceof PageViewport).toEqual(true);
@@ -3062,6 +3107,41 @@ Caron Broadcasting, Inc., an Ohio corporation (“Lessee”).`)
       const renderTask = page.render({
         canvasContext: canvasAndCtx.context,
         viewport,
+      });
+      expect(renderTask instanceof RenderTask).toEqual(true);
+
+      renderTask.cancel();
+
+      try {
+        await renderTask.promise;
+
+        // Shouldn't get here.
+        expect(false).toEqual(true);
+      } catch (reason) {
+        expect(reason instanceof RenderingCancelledException).toEqual(true);
+        expect(reason.message).toEqual("Rendering cancelled, page 1");
+        expect(reason.type).toEqual("canvas");
+        expect(reason.extraDelay).toEqual(0);
+      }
+
+      CanvasFactory.destroy(canvasAndCtx);
+    });
+
+    it("cancels rendering of page with renderOperatorList", async function () {
+      const viewport = page.getViewport({ scale: 1 });
+      expect(viewport instanceof PageViewport).toEqual(true);
+
+      const canvasAndCtx = CanvasFactory.create(
+        viewport.width,
+        viewport.height
+      );
+
+      const opList = await page.getOperatorList();
+
+      const renderTask = page.renderOperatorList({
+        canvasContext: canvasAndCtx.context,
+        viewport,
+        operatorList: opList
       });
       expect(renderTask instanceof RenderTask).toEqual(true);
 
@@ -3119,6 +3199,48 @@ Caron Broadcasting, Inc., an Ohio corporation (“Lessee”).`)
       CanvasFactory.destroy(canvasAndCtx);
     });
 
+    it("re-render page, using the same canvas, after cancelling rendering using renderOperatorList", async function () {
+      const viewport = page.getViewport({ scale: 1 });
+      expect(viewport instanceof PageViewport).toEqual(true);
+
+      const canvasAndCtx = CanvasFactory.create(
+        viewport.width,
+        viewport.height
+      );
+
+      const opList = await page.getOperatorList();
+
+      const renderTask = page.renderOperatorList({
+        canvasContext: canvasAndCtx.context,
+        viewport,
+        operatorList: opList,
+      });
+      expect(renderTask instanceof RenderTask).toEqual(true);
+
+      renderTask.cancel();
+
+      try {
+        await renderTask.promise;
+
+        // Shouldn't get here.
+        expect(false).toEqual(true);
+      } catch (reason) {
+        expect(reason instanceof RenderingCancelledException).toEqual(true);
+      }
+
+      const reRenderTask = page.renderOperatorList({
+        canvasContext: canvasAndCtx.context,
+        viewport,
+        operatorList: opList
+      });
+      expect(reRenderTask instanceof RenderTask).toEqual(true);
+
+      await reRenderTask.promise;
+      expect(reRenderTask.separateAnnots).toEqual(false);
+
+      CanvasFactory.destroy(canvasAndCtx);
+    });
+
     it("multiple render() on the same canvas", async function () {
       const optionalContentConfigPromise =
         pdfDocument.getOptionalContentConfig();
@@ -3141,6 +3263,92 @@ Caron Broadcasting, Inc., an Ohio corporation (“Lessee”).`)
         canvasContext: canvasAndCtx.context,
         viewport,
         optionalContentConfigPromise,
+      });
+      expect(renderTask2 instanceof RenderTask).toEqual(true);
+
+      await Promise.all([
+        renderTask1.promise,
+        renderTask2.promise.then(
+          () => {
+            // Shouldn't get here.
+            expect(false).toEqual(true);
+          },
+          reason => {
+            // It fails because we are already using this canvas.
+            expect(/multiple render\(\)/.test(reason.message)).toEqual(true);
+          }
+        ),
+      ]);
+    });
+
+    it("multiple render() on the same canvas", async function () {
+      const optionalContentConfigPromise =
+        pdfDocument.getOptionalContentConfig();
+
+      const viewport = page.getViewport({ scale: 1 });
+      expect(viewport instanceof PageViewport).toEqual(true);
+
+      const canvasAndCtx = CanvasFactory.create(
+        viewport.width,
+        viewport.height
+      );
+      const renderTask1 = page.render({
+        canvasContext: canvasAndCtx.context,
+        viewport,
+        optionalContentConfigPromise,
+      });
+      expect(renderTask1 instanceof RenderTask).toEqual(true);
+
+      const renderTask2 = page.render({
+        canvasContext: canvasAndCtx.context,
+        viewport,
+        optionalContentConfigPromise,
+      });
+      expect(renderTask2 instanceof RenderTask).toEqual(true);
+
+      await Promise.all([
+        renderTask1.promise,
+        renderTask2.promise.then(
+          () => {
+            // Shouldn't get here.
+            expect(false).toEqual(true);
+          },
+          reason => {
+            // It fails because we are already using this canvas.
+            expect(/multiple render\(\)/.test(reason.message)).toEqual(true);
+          }
+        ),
+      ]);
+    });
+
+    it("multiple renderOperatorList() on the same canvas", async function () {
+      const optionalContentConfigPromise =
+        pdfDocument.getOptionalContentConfig();
+
+      const viewport = page.getViewport({ scale: 1 });
+      expect(viewport instanceof PageViewport).toEqual(true);
+
+      const canvasAndCtx = CanvasFactory.create(
+        viewport.width,
+        viewport.height
+      );
+
+      const opList = await page.getOperatorList();
+
+      const renderTask1 = page.renderOperatorList({
+        canvasContext: canvasAndCtx.context,
+        viewport,
+        optionalContentConfigPromise,
+        operatorList: opList,
+      });
+
+      expect(renderTask1 instanceof RenderTask).toEqual(true);
+
+      const renderTask2 = page.renderOperatorList({
+        canvasContext: canvasAndCtx.context,
+        viewport,
+        optionalContentConfigPromise,
+        operatorList: opList,
       });
       expect(renderTask2 instanceof RenderTask).toEqual(true);
 
