@@ -1543,6 +1543,140 @@ class PDFPageProxy {
     return renderTask;
   }
 
+  renderOperatorList({
+    canvasContext,
+    viewport,
+    intent = "display",
+    annotationMode = AnnotationMode.ENABLE,
+    transform = null,
+    background = null,
+    optionalContentConfigPromise = null,
+    annotationCanvasMap = null,
+    pageColors = null,
+    printAnnotationStorage = null,
+    operatorList = null,
+  }) {
+    if (
+      (typeof PDFJSDev === "undefined" || PDFJSDev.test("GENERIC")) &&
+      arguments[0]?.canvasFactory
+    ) {
+      throw new Error(
+        "RenderOperatorList no longer accepts the `canvasFactory`-option, " +
+          "please pass it to the `getDocument`-function instead."
+      );
+    }
+
+    if(operatorList === undefined || operatorList.length <= 0)
+      throw new Error("RenderOperatorList should be provided with a valid op list");
+
+    this._stats?.time("Overall");
+
+    const intentArgs = this._transport.getRenderingIntent(
+      intent,
+      annotationMode,
+      printAnnotationStorage
+    );
+    // If there was a pending destroy, cancel it so no cleanup happens during
+    // this call to render...
+    this.#pendingCleanup = false;
+    // ... and ensure that a delayed cleanup is always aborted.
+    this.#abortDelayedCleanup();
+
+    if (!optionalContentConfigPromise) {
+      optionalContentConfigPromise = this._transport.getOptionalContentConfig();
+    }
+
+    let intentState = this._intentStates.get(intentArgs.cacheKey);
+    if (!intentState) {
+      intentState = Object.create(null);
+      this._intentStates.set(intentArgs.cacheKey, intentState);
+    }
+
+    intentState.operatorList = {
+      fnArray: [],
+      argsArray: [],
+      lastChunk: false,
+      separateAnnots: null,
+    };
+
+    intentState.operatorList = operatorList;
+
+    const intentPrint = !!(
+      intentArgs.renderingIntent & RenderingIntentFlag.PRINT
+    );
+
+    const complete = error => {
+      intentState.renderTasks.delete(internalRenderTask);
+
+      // Attempt to reduce memory usage during *printing*, by always running
+      // cleanup immediately once rendering has finished.
+      if (this._maybeCleanupAfterRender || intentPrint) {
+        this.#pendingCleanup = true;
+      }
+      this.#tryCleanup(/* delayed = */ !intentPrint);
+
+      if (error) {
+        internalRenderTask.capability.reject(error);
+
+        this._abortOperatorList({
+          intentState,
+          reason: error instanceof Error ? error : new Error(error),
+        });
+      } else {
+        internalRenderTask.capability.resolve();
+      }
+
+      this._stats?.timeEnd("Rendering");
+      this._stats?.timeEnd("Overall");
+    };
+
+    const internalRenderTask = new InternalRenderTask({
+      callback: complete,
+      // Only include the required properties, and *not* the entire object.
+      params: {
+        canvasContext,
+        viewport,
+        transform,
+        background,
+      },
+      objs: this.objs,
+      commonObjs: this.commonObjs,
+      annotationCanvasMap,
+      operatorList: intentState.operatorList,
+      pageIndex: this._pageIndex,
+      canvasFactory: this._transport.canvasFactory,
+      filterFactory: this._transport.filterFactory,
+      useRequestAnimationFrame: !intentPrint,
+      pdfBug: this._pdfBug,
+      pageColors,
+    });
+
+    (intentState.renderTasks ||= new Set()).add(internalRenderTask);
+    const renderTask = internalRenderTask.task;
+
+    this._stats?.time("Rendering");
+
+    Promise.all([
+      optionalContentConfigPromise,
+    ])
+      .then(([transparency, optionalContentConfig]) => {
+        if (this.#pendingCleanup) {
+          complete();
+          return;
+        }
+        this._stats?.time("Rendering");
+
+        internalRenderTask.initializeGraphics({
+          transparency,
+          optionalContentConfig,
+        });
+        internalRenderTask.operatorListChanged();
+      })
+      .catch(complete);
+
+    return renderTask;
+  }
+
   /**
    * @param {GetOperatorListParameters} params - Page getOperatorList
    *   parameters.
