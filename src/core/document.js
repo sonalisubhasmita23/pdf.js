@@ -49,7 +49,7 @@ import { Catalog } from "./catalog.js";
 import { clearGlobalCaches } from "./cleanup_helper.js";
 import { DatasetReader } from "./dataset_reader.js";
 import { Linearization } from "./parser.js";
-import { NullStream } from "./stream.js";
+import { NullStream, StringStream } from "./stream.js";
 import { ObjectLoader } from "./object_loader.js";
 import { OperatorList } from "./operator_list.js";
 import { PartialEvaluator } from "./evaluator.js";
@@ -565,6 +565,40 @@ class Page {
       structTreeRoot,
     ]);
     return structTree.serializable;
+  }
+
+  async getOperatorListFromRawString(handler, task, opStr) {
+
+    const partialEvaluator = new PartialEvaluator({
+      xref: this.xref,
+      handler,
+      pageIndex: this.pageIndex,
+      idFactory: this._localIdFactory,
+      fontCache: this.fontCache,
+      builtInCMapCache: this.builtInCMapCache,
+      standardFontDataCache: this.standardFontDataCache,
+      globalImageCache: this.globalImageCache,
+      systemFontCache: this.systemFontCache,
+      options: this.evaluatorOptions,
+    });
+
+    const opList = new OperatorList();
+
+    await partialEvaluator
+        .getOperatorList({
+          stream: new StringStream(opStr),
+          task,
+          resources: this.resources,
+          operatorList: opList,
+        });
+
+    //Only passing the relevant data for now
+    let opListArr = {
+      argsArray: opList.argsArray,
+      fnArray: opList.fnArray,
+    }
+     
+    return opListArr;
   }
 
   /**

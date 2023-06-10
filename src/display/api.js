@@ -1806,6 +1806,14 @@ class PDFPageProxy {
   }
 
   /**
+   *  @returns operator list from a chunk of raw string
+   *  If stream is not a correct one no error will be thrown
+   */
+  getOperatorListFromRawString(opStr, pageIndex) {
+    return this._transport.getOperatorListFromRawString(opStr, pageIndex);
+  }
+
+  /**
    * Destroys the page object.
    * @private
    */
@@ -3156,6 +3164,13 @@ class WorkerTransport {
   getStructTree(pageIndex) {
     return this.messageHandler.sendWithPromise("GetStructTree", {
       pageIndex,
+    });
+  }
+
+  getOperatorListFromRawString(opStr, pageIndex) {
+    return this.messageHandler.sendWithPromise("GetOperatorListFromRawString", {
+      opStr,
+      pageIndex
     });
   }
 
