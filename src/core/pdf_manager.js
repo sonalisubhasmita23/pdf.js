@@ -121,6 +121,10 @@ class BasePdfManager {
   updatePassword(password) {
     this._password = password;
   }
+  
+  getOperatorListFromRawString(handler, task, opStr){
+    return this.pdfDocument.getOperatorListFromRawString(handler, task, opStr);
+  }
 
   terminate(reason) {
     unreachable("Abstract method `terminate` called");

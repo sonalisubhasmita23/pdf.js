@@ -770,6 +770,26 @@ class WorkerMessageHandler {
       });
     });
 
+    handler.on("GetOperatorListFromRawString", function (data) {
+
+      return pdfManager.getPage(data.pageIndex).then(function (page) {
+
+        const task = new WorkerTask("getOperatorListFromRawString");
+        startWorkerTask(task);
+
+        let prom = page.getOperatorListFromRawString(handler, task, data.opStr);
+
+        prom.then((list) => {
+          finishWorkerTask(task);
+          return list;
+        });
+
+        return prom;
+      });
+
+    });
+
+
     handler.on("FontFallback", function (data) {
       return pdfManager.fontFallback(data.id, handler);
     });
