@@ -1224,6 +1224,8 @@ class PDFDocumentProxy {
  * @property {Map<string, HTMLCanvasElement>} [annotationCanvasMap] - Map some
  *   annotation ids with canvases used to render them.
  * @property {PrintAnnotationStorage} [printAnnotationStorage]
+ * operatorList
+ * @property {any} [operatorList]
  */
 
 /**
@@ -1543,6 +1545,13 @@ class PDFPageProxy {
     return renderTask;
   }
 
+  /**
+   * Begins the process of rendering a page to the desired context.
+   *
+   * @param {RenderParameters} params - Page render parameters.
+   * @returns {RenderTask} An object that contains a promise that is
+   *   resolved when the page finishes rendering.
+   */
   renderOperatorList({
     canvasContext,
     viewport,
