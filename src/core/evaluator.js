@@ -2214,7 +2214,7 @@ class PartialEvaluator {
               }
             }
         }
-        operatorList.addOp(fn, args);
+        operatorList.addOp(fn, args, operation.objId);
       }
       if (stop) {
         next(deferred);
@@ -4979,6 +4979,7 @@ class EvaluatorPreprocessor {
 
         operation.fn = fn;
         operation.args = args;
+        operation.objId = this.parser.lexer.stream.dict.objId;
         return true;
       }
       if (obj === EOF) {

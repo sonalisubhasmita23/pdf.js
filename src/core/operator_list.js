@@ -477,9 +477,10 @@ class NullOptimizer {
 
   _optimize() {}
 
-  push(fn, args) {
+  push(fn, args, objId) {
     this.queue.fnArray.push(fn);
     this.queue.argsArray.push(args);
+    this.queue.objIdArray.push(objId);
     this._optimize();
   }
 
@@ -589,6 +590,7 @@ class OperatorList {
     this._streamSink = streamSink;
     this.fnArray = [];
     this.argsArray = [];
+    this.objIdArray = [];
     if (streamSink && !(intent & RenderingIntentFlag.OPLIST)) {
       this.optimizer = new QueueOptimizer(this);
     } else {
@@ -621,8 +623,8 @@ class OperatorList {
     return this._totalLength + this.length;
   }
 
-  addOp(fn, args) {
-    this.optimizer.push(fn, args);
+  addOp(fn, args, objId = "0R") {
+    this.optimizer.push(fn, args, objId);
     this.weight++;
     if (this._streamSink) {
       if (this.weight >= OperatorList.CHUNK_SIZE) {
@@ -711,6 +713,7 @@ class OperatorList {
       {
         fnArray: this.fnArray,
         argsArray: this.argsArray,
+        objIdArray: this.objIdArray,
         lastChunk,
         separateAnnots,
         length,
