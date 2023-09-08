@@ -1698,6 +1698,7 @@ class PDFPageProxy {
     intent = "display",
     annotationMode = AnnotationMode.ENABLE,
     printAnnotationStorage = null,
+    computeBbox = false,
   } = {}) {
     function operatorListChanged() {
       if (intentState.operatorList.lastChunk) {
@@ -1734,6 +1735,8 @@ class PDFPageProxy {
       };
 
       this._stats?.time("Page Request");
+
+      intentArgs.computeBbox = computeBbox;
       this._pumpOperatorList(intentArgs);
     }
     return intentState.opListReadCapability.promise;
@@ -1953,7 +1956,7 @@ class PDFPageProxy {
   /**
    * @private
    */
-  _pumpOperatorList({ renderingIntent, cacheKey, annotationStorageMap }) {
+  _pumpOperatorList({ renderingIntent, cacheKey, annotationStorageMap, computeBbox = false }) {
     if (typeof PDFJSDev === "undefined" || PDFJSDev.test("TESTING")) {
       assert(
         Number.isInteger(renderingIntent) && renderingIntent > 0,
@@ -1968,6 +1971,7 @@ class PDFPageProxy {
         intent: renderingIntent,
         cacheKey,
         annotationStorage: annotationStorageMap,
+        computeBbox: computeBbox,
       }
     );
     const reader = readableStream.getReader();

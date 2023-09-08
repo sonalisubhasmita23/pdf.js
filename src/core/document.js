@@ -373,6 +373,7 @@ class Page {
     intent,
     cacheKey,
     annotationStorage = null,
+    computeBbox = false,
   }) {
     const contentStreamPromise = this.getContentStream();
     const resourcesPromise = this.loadResources([
@@ -426,16 +427,30 @@ class Page {
         cacheKey,
       });
 
-      return partialEvaluator
-        .getOperatorList({
-          stream: contentStream,
-          task,
-          resources: this.resources,
-          operatorList: opList,
-        })
-        .then(function () {
-          return opList;
-        });
+      if(computeBbox)
+        return partialEvaluator
+          .getOperatorListEx({
+            stream: contentStream,
+            task,
+            resources: this.resources,
+            operatorList: opList,
+            viewBox: this.view,
+          })
+          .then(function () {
+            return opList;
+          });
+      else
+        return partialEvaluator
+          .getOperatorList({
+            stream: contentStream,
+            task,
+            resources: this.resources,
+            operatorList: opList,
+            viewBox: this.view,
+          })
+          .then(function () {
+            return opList;
+          });
     });
 
     // Fetch the page's annotations and add their operator lists to the

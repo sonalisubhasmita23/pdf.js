@@ -639,6 +639,14 @@ class OperatorList {
     }
   }
 
+  appendArg(index, val) {
+    
+    //console.log(index);
+
+    if(index >= 0)
+      this.argsArray[index].push(val);
+  }
+
   addImageOps(fn, args, optionalContent) {
     if (optionalContent !== undefined) {
       this.addOp(OPS.beginMarkedContentProps, ["OC", optionalContent]);
@@ -725,6 +733,7 @@ class OperatorList {
     this.dependencies.clear();
     this.fnArray.length = 0;
     this.argsArray.length = 0;
+    this.objId.length = 0;
     this.weight = 0;
     this.optimizer.reset();
   }

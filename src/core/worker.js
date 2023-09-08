@@ -677,6 +677,8 @@ class WorkerMessageHandler {
 
     handler.on("GetOperatorList", function (data, sink) {
       const pageIndex = data.pageIndex;
+      const computeBbox = data.computeBbox ;
+
       pdfManager.getPage(pageIndex).then(function (page) {
         const task = new WorkerTask(`GetOperatorList: page ${pageIndex}`);
         startWorkerTask(task);
@@ -693,6 +695,7 @@ class WorkerMessageHandler {
             intent: data.intent,
             cacheKey: data.cacheKey,
             annotationStorage: data.annotationStorage,
+            computeBbox: computeBbox,
           })
           .then(
             function (operatorListInfo) {

@@ -2241,6 +2241,1585 @@ class PartialEvaluator {
     });
   }
 
+  /*
+   *  returns bbox as well. Let's start with text
+   *  
+   *  Most of the code is copied from getOpertorList
+   *  getTextContent
+   */
+  getOperatorListEx({
+    stream,
+    task,
+    resources,
+    operatorList,
+    initialState = null,
+    fallbackFontDict = null,
+    viewBox
+  }) {
+    // Ensure that `resources`/`initialState` is correctly initialized,
+    // even if the provided parameter is e.g. `null`.
+    resources ||= Dict.empty;
+    initialState ||= new EvalState();
+
+    if (!operatorList) {
+      throw new Error('getOperatorList: missing "operatorList" parameter');
+    }
+
+    const self = this;
+    const xref = this.xref;
+    let parsingText = false;
+    const localImageCache = new LocalImageCache();
+    const localColorSpaceCache = new LocalColorSpaceCache();
+    const localGStateCache = new LocalGStateCache();
+    const localTilingPatternCache = new LocalTilingPatternCache();
+    const localShadingPatternCache = new Map();
+
+    const xobjs = resources.get("XObject") || Dict.empty;
+    const patterns = resources.get("Pattern") || Dict.empty;
+    const stateManager = new StateManager(initialState);
+    const preprocessor = new EvaluatorPreprocessor(stream, xref, stateManager);
+    const timeSlotManager = new TimeSlotManager();
+
+    //for text ------------------------
+    let textStateManager = new StateManager(new TextState());
+
+    /*
+     *  lastShowTextIndex is set to the index where showText op is stored in
+     *  the operator list. In turn when we want to update the op list with 
+     *  the data from process text content, we can use this index.  
+     */
+    let lastShowTextIndex = -1;
+
+    const textContentItem = {
+      initialized: false,
+      str: [],
+      totalWidth: 0,
+      totalHeight: 0,
+      width: 0,
+      height: 0,
+      vertical: false,
+      prevTransform: null,
+      textAdvanceScale: 0,
+      spaceInFlowMin: 0,
+      spaceInFlowMax: 0,
+      trackingSpaceMin: Infinity,
+      negativeSpaceMax: -Infinity,
+      notASpace: -Infinity,
+      transform: null,
+      fontName: null,
+      hasEOL: false,
+    };
+
+    let textState;
+
+    let thiz = self;
+    let seenStyles = new Set();
+
+    function processTextContent(
+      operation,
+      disableNormalization = false
+     
+    ) {
+
+      //TODO We may have to go through it again.
+      // For now commenting it.
+      // // const next = function (promise) {
+      // //   enqueueChunk(/* batch = */ true);
+      // //   Promise.all([promise, sink.ready]).then(function () {
+      // //     try {
+      // //       promiseBody(resolve, reject);
+      // //     } catch (ex) {
+      // //       reject(ex);
+      // //     }
+      // //   }, reject);
+      // // };
+
+      // Use a circular buffer (length === 2) to save the last chars in the
+      // text stream.
+      // This implementation of the circular buffer is using a fixed array
+      // and the position of the next element:
+      // function addElement(x) {
+      //   buffer[pos] = x;
+      //   pos = (pos + 1) % buffer.length;
+      // }
+      // It's a way faster than:
+      // function addElement(x) {
+      //   buffer.push(x);
+      //   buffer.shift();
+      // }
+      //
+      // It's useful to know when we need to add a whitespace in the
+      // text chunk.
+      const twoLastChars = [" ", " "];
+      let twoLastCharsPos = 0;
+  
+      /**
+       * Save the last char.\
+       *
+       * @param {string} char'
+       * @returns {boolean} true when the two last chars before adding the new one
+       * are a non-whitespace followed by a whitespace.
+       */
+      function saveLastChar(char) {
+        const nextPos = (twoLastCharsPos + 1) % 2;
+        const ret =
+          twoLastChars[twoLastCharsPos] !== " " && twoLastChars[nextPos] === " ";
+        twoLastChars[twoLastCharsPos] = char;
+        twoLastCharsPos = nextPos;
+  
+        return ret;
+      }
+  
+      function shouldAddWhitepsace() {
+        return (
+          twoLastChars[twoLastCharsPos] !== " " &&
+          twoLastChars[(twoLastCharsPos + 1) % 2] === " "
+        );
+      }
+  
+      function resetLastChars() {
+        twoLastChars[0] = twoLastChars[1] = " ";
+        twoLastCharsPos = 0;
+      }
+  
+      // Used in addFakeSpaces.
+  
+      // A white <= fontSize * TRACKING_SPACE_FACTOR is a tracking space
+      // so it doesn't count as a space.
+      const TRACKING_SPACE_FACTOR = 0.102;
+  
+      // When a white <= fontSize * NOT_A_SPACE_FACTOR, there is no space
+      // even if one is present in the text stream.
+      const NOT_A_SPACE_FACTOR = 0.03;
+  
+      // A negative white < fontSize * NEGATIVE_SPACE_FACTOR induces
+      // a break (a new chunk of text is created).
+      // It doesn't change anything when the text is copied but
+      // it improves potential mismatch between text layer and canvas.
+      const NEGATIVE_SPACE_FACTOR = -0.2;
+  
+      // A white with a width in [fontSize * MIN_FACTOR; fontSize * MAX_FACTOR]
+      // is a space which will be inserted in the current flow of words.
+      // If the width is outside of this range then the flow is broken
+      // (which means a new span in the text layer).
+      // It's useful to adjust the best as possible the span in the layer
+      // to what is displayed in the canvas.
+      const SPACE_IN_FLOW_MIN_FACTOR = 0.102;
+      const SPACE_IN_FLOW_MAX_FACTOR = 0.6;
+  
+      // If a char is too high/too low compared to the previous we just create
+      // a new chunk.
+      // If the advance isn't in the +/-VERTICAL_SHIFT_RATIO * height range then
+      // a new chunk is created.
+      const VERTICAL_SHIFT_RATIO = 0.25;
+  
+      const self = thiz;
+      const xref = thiz.xref;
+      const showSpacedTextBuffer = [];
+  
+      // The xobj is parsed iff it's needed, e.g. if there is a `DO` cmd.
+      let xobjs = null;
+      const emptyXObjectCache = new LocalImageCache();
+      const emptyGStateCache = new LocalGStateCache();
+  
+      function pushWhitespace({
+        width = 0,
+        height = 0,
+        transform = textContentItem.prevTransform,
+        fontName = textContentItem.fontName,
+      }) {  
+      }
+  
+      function getCurrentTextTransform() {
+        // 9.4.4 Text Space Details
+        const font = textState.font;
+        const tsm = [
+          textState.fontSize * textState.textHScale,
+          0,
+          0,
+          textState.fontSize,
+          0,
+          textState.textRise,
+        ];
+  
+        if (
+          font.isType3Font &&
+          (textState.fontSize <= 1 || font.isCharBBox) &&
+          !isArrayEqual(textState.fontMatrix, FONT_IDENTITY_MATRIX)
+        ) {
+          const glyphHeight = font.bbox[3] - font.bbox[1];
+          if (glyphHeight > 0) {
+            tsm[3] *= glyphHeight * textState.fontMatrix[3];
+          }
+        }
+  
+        return Util.transform(
+          textState.ctm,
+          Util.transform(textState.textMatrix, tsm)
+        );
+      }
+  
+      function ensureTextContentItem() {
+        if (textContentItem.initialized) {
+          return textContentItem;
+        }
+        const { font, loadedName } = textState;
+        if (!seenStyles.has(loadedName)) {
+          seenStyles.add(loadedName);
+        }
+        textContentItem.fontName = loadedName;
+  
+        const trm = (textContentItem.transform = getCurrentTextTransform());
+        if (!font.vertical) {
+          textContentItem.width = textContentItem.totalWidth = 0;
+          textContentItem.height = textContentItem.totalHeight = Math.hypot(
+            trm[2],
+            trm[3]
+          );
+          textContentItem.vertical = false;
+        } else {
+          textContentItem.width = textContentItem.totalWidth = Math.hypot(
+            trm[0],
+            trm[1]
+          );
+          textContentItem.height = textContentItem.totalHeight = 0;
+          textContentItem.vertical = true;
+        }
+  
+        const scaleLineX = Math.hypot(
+          textState.textLineMatrix[0],
+          textState.textLineMatrix[1]
+        );
+        const scaleCtmX = Math.hypot(textState.ctm[0], textState.ctm[1]);
+        textContentItem.textAdvanceScale = scaleCtmX * scaleLineX;
+  
+        const { fontSize } = textState;
+        textContentItem.trackingSpaceMin = fontSize * TRACKING_SPACE_FACTOR;
+        textContentItem.notASpace = fontSize * NOT_A_SPACE_FACTOR;
+        textContentItem.negativeSpaceMax = fontSize * NEGATIVE_SPACE_FACTOR;
+        textContentItem.spaceInFlowMin = fontSize * SPACE_IN_FLOW_MIN_FACTOR;
+        textContentItem.spaceInFlowMax = fontSize * SPACE_IN_FLOW_MAX_FACTOR;
+        textContentItem.hasEOL = false;
+  
+        textContentItem.initialized = true;
+        return textContentItem;
+      }
+  
+      function updateAdvanceScale() {
+        if (!textContentItem.initialized) {
+          return;
+        }
+  
+        const scaleLineX = Math.hypot(
+          textState.textLineMatrix[0],
+          textState.textLineMatrix[1]
+        );
+        const scaleCtmX = Math.hypot(textState.ctm[0], textState.ctm[1]);
+        const scaleFactor = scaleCtmX * scaleLineX;
+        if (scaleFactor === textContentItem.textAdvanceScale) {
+          return;
+        }
+  
+        if (!textContentItem.vertical) {
+          textContentItem.totalWidth +=
+            textContentItem.width * textContentItem.textAdvanceScale;
+          textContentItem.width = 0;
+        } else {
+          textContentItem.totalHeight +=
+            textContentItem.height * textContentItem.textAdvanceScale;
+          textContentItem.height = 0;
+        }
+  
+        textContentItem.textAdvanceScale = scaleFactor;
+      }
+  
+      function runBidiTransform(textChunk) {
+        let text = textChunk.str.join("");
+        if (!disableNormalization) {
+          text = normalizeUnicode(text);
+        }
+        const bidiResult = bidi(text, -1, textChunk.vertical);
+        return {
+          str: bidiResult.str,
+          dir: bidiResult.dir,
+          width: Math.abs(textChunk.totalWidth),
+          height: Math.abs(textChunk.totalHeight),
+          transform: textChunk.transform,
+          fontName: textChunk.fontName,
+          hasEOL: textChunk.hasEOL,
+        };
+      }
+  
+      function handleSetFont(fontName, fontRef) {
+        return self
+          .loadFont(fontName, fontRef, resources)
+          .then(function (translated) {
+            if (!translated.font.isType3Font) {
+              return translated;
+            }
+            return translated
+              .loadType3Data(self, resources, task)
+              .catch(function () {
+                // Ignore Type3-parsing errors, since we only use `loadType3Data`
+                // here to ensure that we'll always obtain a useful /FontBBox.
+              })
+              .then(function () {
+                return translated;
+              });
+          })
+          .then(function (translated) {
+            textState.loadedName = translated.loadedName;
+            textState.font = translated.font;
+            textState.fontMatrix =
+              translated.font.fontMatrix || FONT_IDENTITY_MATRIX;
+          });
+      }
+  
+      function applyInverseRotation(x, y, matrix) {
+        const scale = Math.hypot(matrix[0], matrix[1]);
+        return [
+          (matrix[0] * x + matrix[1] * y) / scale,
+          (matrix[2] * x + matrix[3] * y) / scale,
+        ];
+      }
+  
+      function compareWithLastPosition(glyphWidth) {
+        const currentTransform = getCurrentTextTransform();
+        let posX = currentTransform[4];
+        let posY = currentTransform[5];
+  
+        // Check if the glyph is in the viewbox.
+        if (textState.font?.vertical) {
+          if (
+            posX < viewBox[0] ||
+            posX > viewBox[2] ||
+            posY + glyphWidth < viewBox[1] ||
+            posY > viewBox[3]
+          ) {
+            return false;
+          }
+        } else if (
+          posX + glyphWidth < viewBox[0] ||
+          posX > viewBox[2] ||
+          posY < viewBox[1] ||
+          posY > viewBox[3]
+        ) {
+          return false;
+        }
+  
+        if (!textState.font || !textContentItem.prevTransform) {
+          return true;
+        }
+  
+        let lastPosX = textContentItem.prevTransform[4];
+        let lastPosY = textContentItem.prevTransform[5];
+  
+        if (lastPosX === posX && lastPosY === posY) {
+          return true;
+        }
+  
+        let rotate = -1;
+        // Take into account the rotation is the current transform.
+        if (
+          currentTransform[0] &&
+          currentTransform[1] === 0 &&
+          currentTransform[2] === 0
+        ) {
+          rotate = currentTransform[0] > 0 ? 0 : 180;
+        } else if (
+          currentTransform[1] &&
+          currentTransform[0] === 0 &&
+          currentTransform[3] === 0
+        ) {
+          rotate = currentTransform[1] > 0 ? 90 : 270;
+        }
+  
+        switch (rotate) {
+          case 0:
+            break;
+          case 90:
+            [posX, posY] = [posY, posX];
+            [lastPosX, lastPosY] = [lastPosY, lastPosX];
+            break;
+          case 180:
+            [posX, posY, lastPosX, lastPosY] = [
+              -posX,
+              -posY,
+              -lastPosX,
+              -lastPosY,
+            ];
+            break;
+          case 270:
+            [posX, posY] = [-posY, -posX];
+            [lastPosX, lastPosY] = [-lastPosY, -lastPosX];
+            break;
+          default:
+            // This is not a 0, 90, 180, 270 rotation so:
+            //  - remove the scale factor from the matrix to get a rotation matrix
+            //  - apply the inverse (which is the transposed) to the positions
+            // and we can then compare positions of the glyphes to detect
+            // a whitespace.
+            [posX, posY] = applyInverseRotation(posX, posY, currentTransform);
+            [lastPosX, lastPosY] = applyInverseRotation(
+              lastPosX,
+              lastPosY,
+              textContentItem.prevTransform
+            );
+        }
+  
+        if (textState.font.vertical) {
+          const advanceY = (lastPosY - posY) / textContentItem.textAdvanceScale;
+          const advanceX = posX - lastPosX;
+  
+          // When the total height of the current chunk is negative
+          // then we're writing from bottom to top.
+          const textOrientation = Math.sign(textContentItem.height);
+          if (advanceY < textOrientation * textContentItem.negativeSpaceMax) {
+            if (
+              Math.abs(advanceX) >
+              0.5 * textContentItem.width /* not the same column */
+            ) {
+              appendEOL();
+              return true;
+            }
+  
+            resetLastChars();
+            flushTextContentItem();
+            return true;
+          }
+  
+          if (Math.abs(advanceX) > textContentItem.width) {
+            appendEOL();
+            return true;
+          }
+  
+          if (advanceY <= textOrientation * textContentItem.notASpace) {
+            // The real spacing between 2 consecutive chars is thin enough to be
+            // considered a non-space.
+            resetLastChars();
+          }
+  
+          if (advanceY <= textOrientation * textContentItem.trackingSpaceMin) {
+            if (shouldAddWhitepsace()) {
+              // The space is very thin, hence it deserves to have its own span in
+              // order to avoid too much shift between the canvas and the text
+              // layer.
+              resetLastChars();
+              flushTextContentItem();
+              pushWhitespace({ height: Math.abs(advanceY) });
+            } else {
+              textContentItem.height += advanceY;
+            }
+          } else if (
+            !addFakeSpaces(
+              advanceY,
+              textContentItem.prevTransform,
+              textOrientation
+            )
+          ) {
+            if (textContentItem.str.length === 0) {
+              resetLastChars();
+              pushWhitespace({ height: Math.abs(advanceY) });
+            } else {
+              textContentItem.height += advanceY;
+            }
+          }
+  
+          if (Math.abs(advanceX) > textContentItem.width * VERTICAL_SHIFT_RATIO) {
+            flushTextContentItem();
+          }
+  
+          return true;
+        }
+  
+        const advanceX = (posX - lastPosX) / textContentItem.textAdvanceScale;
+        const advanceY = posY - lastPosY;
+  
+        // When the total width of the current chunk is negative
+        // then we're writing from right to left.
+        const textOrientation = Math.sign(textContentItem.width);
+        if (advanceX < textOrientation * textContentItem.negativeSpaceMax) {
+          if (
+            Math.abs(advanceY) >
+            0.5 * textContentItem.height /* not the same line */
+          ) {
+            appendEOL();
+            return true;
+          }
+  
+          // We're moving back so in case the last char was a whitespace
+          // we cancel it: it doesn't make sense to insert it.
+          resetLastChars();
+          flushTextContentItem();
+          return true;
+        }
+  
+        if (Math.abs(advanceY) > textContentItem.height) {
+          appendEOL();
+          return true;
+        }
+  
+        if (advanceX <= textOrientation * textContentItem.notASpace) {
+          // The real spacing between 2 consecutive chars is thin enough to be
+          // considered a non-space.
+          resetLastChars();
+        }
+  
+        if (advanceX <= textOrientation * textContentItem.trackingSpaceMin) {
+          if (shouldAddWhitepsace()) {
+            // The space is very thin, hence it deserves to have its own span in
+            // order to avoid too much shift between the canvas and the text
+            // layer.
+            resetLastChars();
+            flushTextContentItem();
+            pushWhitespace({ width: Math.abs(advanceX) });
+          } else {
+            textContentItem.width += advanceX;
+          }
+        } else if (
+          !addFakeSpaces(advanceX, textContentItem.prevTransform, textOrientation)
+        ) {
+          if (textContentItem.str.length === 0) {
+            resetLastChars();
+            pushWhitespace({ width: Math.abs(advanceX) });
+          } else {
+            textContentItem.width += advanceX;
+          }
+        }
+  
+        if (Math.abs(advanceY) > textContentItem.height * VERTICAL_SHIFT_RATIO) {
+          flushTextContentItem();
+        }
+  
+        return true;
+      }
+  
+      function buildTextContentItem({ chars, extraSpacing }) {
+        const font = textState.font;
+        console.log(font.ascent);
+        if (!chars) {
+          // Just move according to the space we have.
+          const charSpacing = textState.charSpacing + extraSpacing;
+          if (charSpacing) {
+            if (!font.vertical) {
+              textState.translateTextMatrix(
+                charSpacing * textState.textHScale,
+                0
+              );
+            } else {
+              textState.translateTextMatrix(0, -charSpacing);
+            }
+          }
+  
+          return;
+        }
+  
+        const glyphs = font.charsToGlyphs(chars);
+        const scale = textState.fontMatrix[0] * textState.fontSize;
+  
+        for (let i = 0, ii = glyphs.length; i < ii; i++) {
+          const glyph = glyphs[i];
+          const { category } = glyph;
+  
+          if (category.isInvisibleFormatMark) {
+            continue;
+          }
+          let charSpacing =
+            textState.charSpacing + (i + 1 === ii ? extraSpacing : 0);
+  
+          let glyphWidth = glyph.width;
+          if (font.vertical) {
+            glyphWidth = glyph.vmetric ? glyph.vmetric[0] : -glyphWidth;
+          }
+          let scaledDim = glyphWidth * scale;
+  
+          if (category.isWhitespace) {
+            // Don't push a " " in the textContentItem
+            // (except when it's between two non-spaces chars),
+            // it will be done (if required) in next call to
+            // compareWithLastPosition.
+            // This way we can merge real spaces and spaces due to cursor moves.
+            if (!font.vertical) {
+              charSpacing += scaledDim + textState.wordSpacing;
+              textState.translateTextMatrix(
+                charSpacing * textState.textHScale,
+                0
+              );
+            } else {
+              charSpacing += -scaledDim + textState.wordSpacing;
+              textState.translateTextMatrix(0, -charSpacing);
+            }
+            saveLastChar(" ");
+            continue;
+          }
+  
+          if (
+            !category.isZeroWidthDiacritic &&
+            !compareWithLastPosition(scaledDim)
+          ) {
+            // The glyph is not in page so just skip it but move the cursor.
+            if (!font.vertical) {
+              textState.translateTextMatrix(scaledDim * textState.textHScale, 0);
+            } else {
+              textState.translateTextMatrix(0, scaledDim);
+            }
+            continue;
+          }
+  
+          // Must be called after compareWithLastPosition because
+          // the textContentItem could have been flushed.
+          const textChunk = ensureTextContentItem();
+          if (category.isZeroWidthDiacritic) {
+            scaledDim = 0;
+          }
+  
+          if (!font.vertical) {
+            scaledDim *= textState.textHScale;
+            textState.translateTextMatrix(scaledDim, 0);
+            textChunk.width += scaledDim;
+          } else {
+            textState.translateTextMatrix(0, scaledDim);
+            scaledDim = Math.abs(scaledDim);
+            textChunk.height += scaledDim;
+          }
+  
+          if (scaledDim) {
+            // Save the position of the last visible character.
+            textChunk.prevTransform = getCurrentTextTransform();
+          }
+  
+          const glyphUnicode = glyph.unicode;
+          if (saveLastChar(glyphUnicode)) {
+            // The two last chars are a non-whitespace followed by a whitespace
+            // and then this non-whitespace, so we insert a whitespace here.
+            // Replaces all whitespaces with standard spaces (0x20), to avoid
+            // alignment issues between the textLayer and the canvas if the text
+            // contains e.g. tabs (fixes issue6612.pdf).
+            textChunk.str.push(" ");
+          }
+          textChunk.str.push(glyphUnicode);
+  
+          if (charSpacing) {
+            if (!font.vertical) {
+              textState.translateTextMatrix(
+                charSpacing * textState.textHScale,
+                0
+              );
+            } else {
+              textState.translateTextMatrix(0, -charSpacing);
+            }
+          }
+        }
+      }
+  
+      function appendEOL() {
+        resetLastChars();
+        if (textContentItem.initialized) {
+          textContentItem.hasEOL = true;
+          flushTextContentItem();
+        } else {
+          //May need in future
+        }
+      }
+  
+      function addFakeSpaces(width, transf, textOrientation) {
+        if (
+          textOrientation * textContentItem.spaceInFlowMin <= width &&
+          width <= textOrientation * textContentItem.spaceInFlowMax
+        ) {
+          if (textContentItem.initialized) {
+            resetLastChars();
+            textContentItem.str.push(" ");
+          }
+          return false;
+        }
+  
+        const fontName = textContentItem.fontName;
+  
+        let height = 0;
+        if (textContentItem.vertical) {
+          height = width;
+          width = 0;
+        }
+  
+        flushTextContentItem();
+        resetLastChars();
+        pushWhitespace({
+          width: Math.abs(width),
+          height: Math.abs(height),
+          transform: transf || getCurrentTextTransform(),
+          fontName,
+        });
+  
+        return true;
+      }
+  
+      function flushTextContentItem() {
+        if (!textContentItem.initialized || !textContentItem.str) {
+          return;
+        }
+  
+        // Do final text scaling.
+        if (!textContentItem.vertical) {
+          textContentItem.totalWidth +=
+            textContentItem.width * textContentItem.textAdvanceScale;
+        } else {
+          textContentItem.totalHeight +=
+            textContentItem.height * textContentItem.textAdvanceScale;
+        }
+  
+        //We will have to delete//textContent.items.push(runBidiTransform(textContentItem));
+        operatorList.appendArg(lastShowTextIndex, runBidiTransform(textContentItem));
+
+        textContentItem.initialized = false;
+        textContentItem.str.length = 0;
+      }
+
+      try {
+
+        {
+
+          const previousState = textState;
+          textState = textStateManager.state;
+          const fn = operation.fn;
+          let args = operation.args;
+  
+          switch (fn | 0) {
+            case OPS.setFont:
+              // Optimization to ignore multiple identical Tf commands.
+              var fontNameArg = args[0].name,
+                fontSizeArg = args[1];
+              if (
+                textState.font &&
+                fontNameArg === textState.fontName &&
+                fontSizeArg === textState.fontSize
+              ) {
+                break;
+              }
+  
+              flushTextContentItem();
+              textState.fontName = fontNameArg;
+              textState.fontSize = fontSizeArg;
+              //next(handleSetFont(fontNameArg, null));
+              //handleSetFont(fontNameArg, null)
+              return;
+            case OPS.setTextRise:
+              textState.textRise = args[0];
+              break;
+            case OPS.setHScale:
+              textState.textHScale = args[0] / 100;
+              break;
+            case OPS.setLeading:
+              textState.leading = args[0];
+              break;
+            case OPS.moveText:
+              textState.translateTextLineMatrix(args[0], args[1]);
+              textState.textMatrix = textState.textLineMatrix.slice();
+              break;
+            case OPS.setLeadingMoveText:
+              textState.leading = -args[1];
+              textState.translateTextLineMatrix(args[0], args[1]);
+              textState.textMatrix = textState.textLineMatrix.slice();
+              break;
+            case OPS.nextLine:
+              textState.carriageReturn();
+              break;
+            case OPS.setTextMatrix:
+              textState.setTextMatrix(
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4],
+                args[5]
+              );
+              textState.setTextLineMatrix(
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4],
+                args[5]
+              );
+              updateAdvanceScale();
+              break;
+            case OPS.setCharSpacing:
+              textState.charSpacing = args[0];
+              break;
+            case OPS.setWordSpacing:
+              textState.wordSpacing = args[0];
+              break;
+            case OPS.beginText:
+              textState.textMatrix = IDENTITY_MATRIX.slice();
+              textState.textLineMatrix = IDENTITY_MATRIX.slice();
+              break;
+            case OPS.showSpacedText:
+              if (!textStateManager.state.font) {
+                self.ensureStateFont(textStateManager.state);
+              }
+  
+              const spaceFactor =
+                ((textState.font.vertical ? 1 : -1) * textState.fontSize) / 1000;
+              const elements = args[0];
+              for (let i = 0, ii = elements.length; i < ii; i++) {
+                const item = elements[i];
+                if (typeof item === "string") {
+                  showSpacedTextBuffer.push(item);
+                } else if (typeof item === "number" && item !== 0) {
+                  // PDF Specification 5.3.2 states:
+                  // The number is expressed in thousandths of a unit of text
+                  // space.
+                  // This amount is subtracted from the current horizontal or
+                  // vertical coordinate, depending on the writing mode.
+                  // In the default coordinate system, a positive adjustment
+                  // has the effect of moving the next glyph painted either to
+                  // the left or down by the given amount.
+                  const str = showSpacedTextBuffer.join("");
+                  showSpacedTextBuffer.length = 0;
+                  buildTextContentItem({
+                    chars: str,
+                    extraSpacing: item * spaceFactor,
+                  });
+                }
+              }
+  
+              if (showSpacedTextBuffer.length > 0) {
+                const str = showSpacedTextBuffer.join("");
+                showSpacedTextBuffer.length = 0;
+                buildTextContentItem({
+                  chars: str,
+                  extraSpacing: 0,
+                });
+              }
+              break;
+            case OPS.showText:
+              if (!textStateManager.state.font) {
+                self.ensureStateFont(textStateManager.state);
+                                                                                
+              }
+              buildTextContentItem({
+                chars: args[0],
+                extraSpacing: 0,
+              });
+              break;
+            case OPS.nextLineShowText:
+              if (!textStateManager.state.font) {
+                self.ensureStateFont(textStateManager.state);
+              }
+              textState.carriageReturn();
+              buildTextContentItem({
+                chars: args[0],
+                extraSpacing: 0,
+              });
+              break;
+            case OPS.nextLineSetSpacingShowText:
+              if (!textStateManager.state.font) {
+                self.ensureStateFont(textStateManager.state);
+              }
+              textState.wordSpacing = args[0];
+              textState.charSpacing = args[1];
+              textState.carriageReturn();
+              buildTextContentItem({
+                chars: args[2],
+                extraSpacing: 0,
+              });
+              break;
+            case OPS.paintXObject:
+              flushTextContentItem();
+               
+              break;
+            case OPS.setGState:
+              //TODO if you see any break check for code in getTextContent
+              isValidName = args[0] instanceof Name;
+              name = args[0].name;
+  
+              if (isValidName && emptyGStateCache.getByName(name)) {
+                break;
+              }
+
+              //The following cide is made sync.
+              if (!isValidName) {
+                throw new FormatError("GState must be referred to by name.");
+              }
+
+              const extGState = resources.get("ExtGState");
+              if (!(extGState instanceof Dict)) {
+                throw new FormatError("ExtGState should be a dictionary.");
+              }
+
+              const gState = extGState.get(name);
+              // TODO: Attempt to lookup cached GStates by reference as well,
+              //       if and only if there are PDF documents where doing so
+              //       would significantly improve performance.
+              if (!(gState instanceof Dict)) {
+                throw new FormatError("GState should be a dictionary.");
+              }
+
+              const gStateFont = gState.get("Font");
+              if (!gStateFont) {
+                emptyGStateCache.set(name, gState.objId, true);
+
+                resolveGState();
+                return;
+              }
+              flushTextContentItem();
+
+              textState.fontName = null;
+              textState.fontSize = gStateFont[1];
+              handleSetFont(null, gStateFont[0]);
+              
+              return;
+            case OPS.beginMarkedContent:
+              flushTextContentItem();
+              if (includeMarkedContent) {
+                markedContentData.level++;
+                
+              }
+              break;
+            case OPS.beginMarkedContentProps:
+              flushTextContentItem();
+              if (includeMarkedContent) {
+                markedContentData.level++;
+  
+                let mcid = null;
+                if (args[1] instanceof Dict) {
+                  mcid = args[1].get("MCID");
+                }
+              }
+              break;
+            case OPS.endMarkedContent:
+              flushTextContentItem();
+              if (includeMarkedContent) {
+                if (markedContentData.level === 0) {
+                  // Handle unbalanced beginMarkedContent/endMarkedContent
+                  // operators (fixes issue15629.pdf).
+                  break;
+                }
+                markedContentData.level--;
+              }
+              break;
+            case OPS.restore:
+              if (
+                previousState &&
+                (previousState.font !== textState.font ||
+                  previousState.fontSize !== textState.fontSize ||
+                  previousState.fontName !== textState.fontName)
+              ) {
+                flushTextContentItem();
+              }
+              break;
+          } 
+        }
+        flushTextContentItem();
+      }catch(reason){
+        if (reason instanceof AbortException) {
+          return;
+        }
+        if (thiz.options.ignoreErrors) {
+          // Error(s) in the TextContent -- allow text-extraction to continue.
+          warn(
+            `getTextContent - ignoring errors during "${task.name}" ` +
+              `task: "${reason}".`
+          );
+  
+          flushTextContentItem();
+          enqueueChunk();
+          return;
+        }
+        throw reason;
+      };
+
+    }
+    
+    function closePendingRestoreOPS(argument) {
+      for (let i = 0, ii = preprocessor.savedStatesDepth; i < ii; i++) {
+        operatorList.addOp(OPS.restore, []);
+      }
+    }
+
+    return new Promise(function promiseBody(resolve, reject) {
+      const next = function (promise) {
+        Promise.all([promise, operatorList.ready]).then(function () {
+          try {
+            promiseBody(resolve, reject);
+          } catch (ex) {
+            reject(ex);
+          }
+        }, reject);
+      };
+      task.ensureNotTerminated();
+      timeSlotManager.reset();
+
+      const operation = {};
+      let stop, i, ii, cs, name, isValidName;
+
+      while (!(stop = timeSlotManager.check())) {
+        // The arguments parsed by read() are used beyond this loop, so we
+        // cannot reuse the same array on each iteration. Therefore we pass
+        // in |null| as the initial value (see the comment on
+        // EvaluatorPreprocessor_read() for why).
+        operation.args = null;
+        if (!preprocessor.read(operation)) {
+          break;
+        }
+        let args = operation.args;
+        let fn = operation.fn;
+        let callProcessTextContent = true;
+
+        switch (fn | 0) {
+          case OPS.paintXObject:
+            // eagerly compile XForm objects
+            isValidName = args[0] instanceof Name;
+            name = args[0].name;
+
+            if (isValidName) {
+              const localImage = localImageCache.getByName(name);
+              if (localImage) {
+                operatorList.addImageOps(
+                  localImage.fn,
+                  localImage.args,
+                  localImage.optionalContent
+                );
+
+                incrementCachedImageMaskCount(localImage);
+                args = null;
+                continue;
+              }
+            }
+
+            next(
+              new Promise(function (resolveXObject, rejectXObject) {
+                if (!isValidName) {
+                  throw new FormatError("XObject must be referred to by name.");
+                }
+
+                let xobj = xobjs.getRaw(name);
+                if (xobj instanceof Ref) {
+                  const localImage =
+                    localImageCache.getByRef(xobj) ||
+                    self._regionalImageCache.getByRef(xobj);
+                  if (localImage) {
+                    operatorList.addImageOps(
+                      localImage.fn,
+                      localImage.args,
+                      localImage.optionalContent
+                    );
+
+                    incrementCachedImageMaskCount(localImage);
+                    resolveXObject();
+                    return;
+                  }
+
+                  const globalImage = self.globalImageCache.getData(
+                    xobj,
+                    self.pageIndex
+                  );
+                  if (globalImage) {
+                    operatorList.addDependency(globalImage.objId);
+                    operatorList.addImageOps(
+                      globalImage.fn,
+                      globalImage.args,
+                      globalImage.optionalContent
+                    );
+
+                    resolveXObject();
+                    return;
+                  }
+
+                  xobj = xref.fetch(xobj);
+                }
+
+                if (!(xobj instanceof BaseStream)) {
+                  throw new FormatError("XObject should be a stream");
+                }
+
+                const type = xobj.dict.get("Subtype");
+                if (!(type instanceof Name)) {
+                  throw new FormatError("XObject should have a Name subtype");
+                }
+
+                if (type.name === "Form") {
+                  stateManager.save();
+                  self
+                    .buildFormXObject(
+                      resources,
+                      xobj,
+                      null,
+                      operatorList,
+                      task,
+                      stateManager.state.clone(),
+                      localColorSpaceCache
+                    )
+                    .then(function () {
+                      stateManager.restore();
+                      resolveXObject();
+                    }, rejectXObject);
+                  return;
+                } else if (type.name === "Image") {
+                  self
+                    .buildPaintImageXObject({
+                      resources,
+                      image: xobj,
+                      operatorList,
+                      cacheKey: name,
+                      localImageCache,
+                      localColorSpaceCache,
+                    })
+                    .then(resolveXObject, rejectXObject);
+                  return;
+                } else if (type.name === "PS") {
+                  // PostScript XObjects are unused when viewing documents.
+                  // See section 4.7.1 of Adobe's PDF reference.
+                  info("Ignored XObject subtype PS");
+                } else {
+                  throw new FormatError(
+                    `Unhandled XObject subtype ${type.name}`
+                  );
+                }
+                resolveXObject();
+              }).catch(function (reason) {
+                if (reason instanceof AbortException) {
+                  return;
+                }
+                if (self.options.ignoreErrors) {
+                  warn(`getOperatorList - ignoring XObject: "${reason}".`);
+                  return;
+                }
+                throw reason;
+              })
+            );
+            return;
+          case OPS.setFont:
+            var fontSize = args[1];
+            // eagerly collect all fonts
+            next(
+              self
+                .handleSetFont(
+                  resources,
+                  args,
+                  null,
+                  operatorList,
+                  task,
+                  stateManager.state,
+                  fallbackFontDict
+                )
+                .then(function (loadedName) {
+                  operatorList.addDependency(loadedName);
+                  operatorList.addOp(OPS.setFont, [loadedName, fontSize]);
+                  processTextContent({fn:OPS.setFont, args:[{name: loadedName}, fontSize]});
+                  textState.font = stateManager.state.font;
+                })
+            );
+           // return; /////////////////////////
+           return;
+           break;
+          case OPS.beginText:
+            parsingText = true;
+            break;
+          case OPS.endText:
+            parsingText = false;
+            break;
+          case OPS.endInlineImage:
+            var cacheKey = args[0].cacheKey;
+            if (cacheKey) {
+              const localImage = localImageCache.getByName(cacheKey);
+              if (localImage) {
+                operatorList.addImageOps(
+                  localImage.fn,
+                  localImage.args,
+                  localImage.optionalContent
+                );
+
+                incrementCachedImageMaskCount(localImage);
+                args = null;
+                continue;
+              }
+            }
+            next(
+              self.buildPaintImageXObject({
+                resources,
+                image: args[0],
+                isInline: true,
+                operatorList,
+                cacheKey,
+                localImageCache,
+                localColorSpaceCache,
+              })
+            );
+            return;
+          case OPS.showText:
+            if (!stateManager.state.font) {
+              self.ensureStateFont(stateManager.state);
+              continue;
+            }
+            var tempArgs = self.handleText(args[0], stateManager.state);
+
+            processTextContent({fn:OPS.showText, args:args});
+            callProcessTextContent = false;
+            args[0] = tempArgs;
+
+            lastShowTextIndex = operatorList.length;
+            break;
+          case OPS.showSpacedText:
+            if (!stateManager.state.font) {
+              self.ensureStateFont(stateManager.state);
+              continue;
+            }
+            var combinedGlyphs = [];
+            var state = stateManager.state;
+            for (const arrItem of args[0]) {
+              if (typeof arrItem === "string") {
+                combinedGlyphs.push(...self.handleText(arrItem, state));
+              } else if (typeof arrItem === "number") {
+                combinedGlyphs.push(arrItem);
+              }
+            }
+            args[0] = combinedGlyphs;
+            fn = OPS.showText;
+            break;
+          case OPS.nextLineShowText:
+            if (!stateManager.state.font) {
+              self.ensureStateFont(stateManager.state);
+              continue;
+            }
+            operatorList.addOp(OPS.nextLine);
+            args[0] = self.handleText(args[0], stateManager.state);
+            fn = OPS.showText;
+            break;
+          case OPS.nextLineSetSpacingShowText:
+            if (!stateManager.state.font) {
+              self.ensureStateFont(stateManager.state);
+              continue;
+            }
+            operatorList.addOp(OPS.nextLine);
+            operatorList.addOp(OPS.setWordSpacing, [args.shift()]);
+            operatorList.addOp(OPS.setCharSpacing, [args.shift()]);
+            args[0] = self.handleText(args[0], stateManager.state);
+            fn = OPS.showText;
+            break;
+          case OPS.setTextRenderingMode:
+            stateManager.state.textRenderingMode = args[0];
+            break;
+
+          case OPS.setFillColorSpace: {
+            const cachedColorSpace = ColorSpace.getCached(
+              args[0],
+              xref,
+              localColorSpaceCache
+            );
+            if (cachedColorSpace) {
+              stateManager.state.fillColorSpace = cachedColorSpace;
+              continue;
+            }
+
+            next(
+              self
+                .parseColorSpace({
+                  cs: args[0],
+                  resources,
+                  localColorSpaceCache,
+                })
+                .then(function (colorSpace) {
+                  if (colorSpace) {
+                    stateManager.state.fillColorSpace = colorSpace;
+                  }
+                })
+            );
+            return;
+          }
+          case OPS.setStrokeColorSpace: {
+            const cachedColorSpace = ColorSpace.getCached(
+              args[0],
+              xref,
+              localColorSpaceCache
+            );
+            if (cachedColorSpace) {
+              stateManager.state.strokeColorSpace = cachedColorSpace;
+              continue;
+            }
+
+            next(
+              self
+                .parseColorSpace({
+                  cs: args[0],
+                  resources,
+                  localColorSpaceCache,
+                })
+                .then(function (colorSpace) {
+                  if (colorSpace) {
+                    stateManager.state.strokeColorSpace = colorSpace;
+                  }
+                })
+            );
+            return;
+          }
+          case OPS.setFillColor:
+            cs = stateManager.state.fillColorSpace;
+            args = cs.getRgb(args, 0);
+            fn = OPS.setFillRGBColor;
+            break;
+          case OPS.setStrokeColor:
+            cs = stateManager.state.strokeColorSpace;
+            args = cs.getRgb(args, 0);
+            fn = OPS.setStrokeRGBColor;
+            break;
+          case OPS.setFillGray:
+            stateManager.state.fillColorSpace = ColorSpace.singletons.gray;
+            args = ColorSpace.singletons.gray.getRgb(args, 0);
+            fn = OPS.setFillRGBColor;
+            break;
+          case OPS.setStrokeGray:
+            stateManager.state.strokeColorSpace = ColorSpace.singletons.gray;
+            args = ColorSpace.singletons.gray.getRgb(args, 0);
+            fn = OPS.setStrokeRGBColor;
+            break;
+          case OPS.setFillCMYKColor:
+            stateManager.state.fillColorSpace = ColorSpace.singletons.cmyk;
+            args = ColorSpace.singletons.cmyk.getRgb(args, 0);
+            fn = OPS.setFillRGBColor;
+            break;
+          case OPS.setStrokeCMYKColor:
+            stateManager.state.strokeColorSpace = ColorSpace.singletons.cmyk;
+            args = ColorSpace.singletons.cmyk.getRgb(args, 0);
+            fn = OPS.setStrokeRGBColor;
+            break;
+          case OPS.setFillRGBColor:
+            stateManager.state.fillColorSpace = ColorSpace.singletons.rgb;
+            args = ColorSpace.singletons.rgb.getRgb(args, 0);
+            break;
+          case OPS.setStrokeRGBColor:
+            stateManager.state.strokeColorSpace = ColorSpace.singletons.rgb;
+            args = ColorSpace.singletons.rgb.getRgb(args, 0);
+            break;
+          case OPS.setFillColorN:
+            cs = stateManager.state.fillColorSpace;
+            if (cs.name === "Pattern") {
+              next(
+                self.handleColorN(
+                  operatorList,
+                  OPS.setFillColorN,
+                  args,
+                  cs,
+                  patterns,
+                  resources,
+                  task,
+                  localColorSpaceCache,
+                  localTilingPatternCache,
+                  localShadingPatternCache
+                )
+              );
+              return;
+            }
+            args = cs.getRgb(args, 0);
+            fn = OPS.setFillRGBColor;
+            break;
+          case OPS.setStrokeColorN:
+            cs = stateManager.state.strokeColorSpace;
+            if (cs.name === "Pattern") {
+              next(
+                self.handleColorN(
+                  operatorList,
+                  OPS.setStrokeColorN,
+                  args,
+                  cs,
+                  patterns,
+                  resources,
+                  task,
+                  localColorSpaceCache,
+                  localTilingPatternCache,
+                  localShadingPatternCache
+                )
+              );
+              return;
+            }
+            args = cs.getRgb(args, 0);
+            fn = OPS.setStrokeRGBColor;
+            break;
+
+          case OPS.shadingFill:
+            var shadingRes = resources.get("Shading");
+            if (!shadingRes) {
+              throw new FormatError("No shading resource found");
+            }
+
+            var shading = shadingRes.get(args[0].name);
+            if (!shading) {
+              throw new FormatError("No shading object found");
+            }
+            const patternId = self.parseShading({
+              shading,
+              resources,
+              localColorSpaceCache,
+              localShadingPatternCache,
+            });
+            args = [patternId];
+            fn = OPS.shadingFill;
+            break;
+          case OPS.setGState:
+            isValidName = args[0] instanceof Name;
+            name = args[0].name;
+
+            if (isValidName) {
+              const localGStateObj = localGStateCache.getByName(name);
+              if (localGStateObj) {
+                if (localGStateObj.length > 0) {
+                  operatorList.addOp(OPS.setGState, [localGStateObj]);
+                }
+                args = null;
+                continue;
+              }
+            }
+
+            next(
+              new Promise(function (resolveGState, rejectGState) {
+                if (!isValidName) {
+                  throw new FormatError("GState must be referred to by name.");
+                }
+
+                const extGState = resources.get("ExtGState");
+                if (!(extGState instanceof Dict)) {
+                  throw new FormatError("ExtGState should be a dictionary.");
+                }
+
+                const gState = extGState.get(name);
+                // TODO: Attempt to lookup cached GStates by reference as well,
+                //       if and only if there are PDF documents where doing so
+                //       would significantly improve performance.
+                if (!(gState instanceof Dict)) {
+                  throw new FormatError("GState should be a dictionary.");
+                }
+
+                self
+                  .setGState({
+                    resources,
+                    gState,
+                    operatorList,
+                    cacheKey: name,
+                    task,
+                    stateManager,
+                    localGStateCache,
+                    localColorSpaceCache,
+                  })
+                  .then(resolveGState, rejectGState);
+              }).catch(function (reason) {
+                if (reason instanceof AbortException) {
+                  return;
+                }
+                if (self.options.ignoreErrors) {
+                  warn(`getOperatorList - ignoring ExtGState: "${reason}".`);
+                  return;
+                }
+                throw reason;
+              })
+            );
+            return;
+          case OPS.moveTo:
+          case OPS.lineTo:
+          case OPS.curveTo:
+          case OPS.curveTo2:
+          case OPS.curveTo3:
+          case OPS.closePath:
+          case OPS.rectangle:
+            self.buildPath(operatorList, fn, args, parsingText);
+            continue;
+          case OPS.markPoint:
+          case OPS.markPointProps:
+          case OPS.beginCompat:
+          case OPS.endCompat:
+            // Ignore operators where the corresponding handlers are known to
+            // be no-op in CanvasGraphics (display/canvas.js). This prevents
+            // serialization errors and is also a bit more efficient.
+            // We could also try to serialize all objects in a general way,
+            // e.g. as done in https://github.com/mozilla/pdf.js/pull/6266,
+            // but doing so is meaningless without knowing the semantics.
+            continue;
+          case OPS.beginMarkedContentProps:
+            if (!(args[0] instanceof Name)) {
+              warn(`Expected name for beginMarkedContentProps arg0=${args[0]}`);
+              continue;
+            }
+            if (args[0].name === "OC") {
+              next(
+                self
+                  .parseMarkedContentProps(args[1], resources)
+                  .then(data => {
+                    operatorList.addOp(OPS.beginMarkedContentProps, [
+                      "OC",
+                      data,
+                    ]);
+                  })
+                  .catch(reason => {
+                    if (reason instanceof AbortException) {
+                      return;
+                    }
+                    if (self.options.ignoreErrors) {
+                      warn(
+                        `getOperatorList - ignoring beginMarkedContentProps: "${reason}".`
+                      );
+                      return;
+                    }
+                    throw reason;
+                  })
+              );
+              return;
+            }
+            // Other marked content types aren't supported yet.
+            args = [
+              args[0].name,
+              args[1] instanceof Dict ? args[1].get("MCID") : null,
+            ];
+
+            break;
+          case OPS.beginMarkedContent:
+          case OPS.endMarkedContent:
+          default:
+            // Note: Ignore the operator if it has `Dict` arguments, since
+            // those are non-serializable, otherwise postMessage will throw
+            // "An object could not be cloned.".
+            if (args !== null) {
+              for (i = 0, ii = args.length; i < ii; i++) {
+                if (args[i] instanceof Dict) {
+                  break;
+                }
+              }
+              if (i < ii) {
+                warn("getOperatorList - ignoring operator: " + fn);
+                continue;
+              }
+            }
+        }
+
+        if(callProcessTextContent)
+          processTextContent(operation);
+
+        callProcessTextContent = true;
+        operatorList.addOp(fn, args, operation.objId);
+      }
+      if (stop) {
+        next(deferred);
+        return;
+      }
+      // Some PDFs don't close all restores inside object/form.
+      // Closing those for them.
+      closePendingRestoreOPS();
+      resolve();
+    }).catch(reason => {
+      if (reason instanceof AbortException) {
+        return;
+      }
+      if (this.options.ignoreErrors) {
+        warn(
+          `getOperatorList - ignoring errors during "${task.name}" ` +
+            `task: "${reason}".`
+        );
+
+        closePendingRestoreOPS();
+        return;
+      }
+      throw reason;
+    });
+  }
+
   getTextContent({
     stream,
     task,
