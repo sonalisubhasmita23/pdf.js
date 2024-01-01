@@ -2468,7 +2468,10 @@ class PartialEvaluator {
           seenStyles.add(loadedName);
         }
         textContentItem.fontName = loadedName;
-  
+        
+        textContentItem.descent = font.descent;
+        textContentItem.ascent = font.ascent;
+
         const trm = (textContentItem.transform = getCurrentTextTransform());
         if (!font.vertical) {
           textContentItem.width = textContentItem.totalWidth = 0;
@@ -2547,6 +2550,8 @@ class PartialEvaluator {
           transform: textChunk.transform,
           fontName: textChunk.fontName,
           hasEOL: textChunk.hasEOL,
+          ascent: textChunk.ascent,
+          descent: textChunk.descent,
         };
       }
   
@@ -2955,7 +2960,7 @@ class PartialEvaluator {
       }
   
       function flushTextContentItem() {
-        if (!textContentItem.initialized || !textContentItem.str) {
+        if (!textContentItem.initialized || !textContentItem.str || lastShowTextIndex === -1) {
           return;
         }
   
