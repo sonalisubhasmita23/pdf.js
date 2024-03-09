@@ -5051,6 +5051,13 @@ class PartialEvaluator {
             }
           }
         }
+
+        this.handler.send("commonobj", [
+          baseDict.loadedName+"_Encoding",
+          "Encoding",
+          encoding._map,
+        ]);
+
       } else if (encoding instanceof Name) {
         baseEncodingName = encoding.name;
       } else {
@@ -5731,6 +5738,12 @@ class PartialEvaluator {
     const isType3Font = type === "Type3";
     let properties;
 
+    this.handler.send("commonobj", [
+      baseDict.loadedName+"_BaseDict",
+      "BaseDict",
+      baseDict._map,
+    ]);
+
     if (!descriptor) {
       if (isType3Font) {
         // FontDescriptor is only required for Type3 fonts when the document
@@ -5809,6 +5822,12 @@ class PartialEvaluator {
                 newProperties
               );
             }
+
+            this.handler.send("commonobj", [
+              newProperties.loadedName+"_Desc",
+              "FontDescriptor",
+              descriptor._map,
+            ]);
             return new Font(baseFontName, file, newProperties);
           }
         );
@@ -5877,9 +5896,16 @@ class PartialEvaluator {
         if (subtypeEntry instanceof Name) {
           subtype = subtypeEntry.name;
         }
+        
         length1 = fontFile.dict.get("Length1");
         length2 = fontFile.dict.get("Length2");
         length3 = fontFile.dict.get("Length3");
+
+        // this.handler.send("commonobj", [
+        //   baseDict.loadedName+"_FontFile",
+        //   "FontFile",
+        //   {length1: length1, length2: length2, length3: length3, filter:fontFile.dict.get("Filter"), source: fontFile.getBytes()},
+        // ]);
       }
     } else if (cssFontInfo) {
       // We've a missing XFA font.
@@ -5962,7 +5988,21 @@ class PartialEvaluator {
       newProperties => {
         this.extractWidths(dict, descriptor, newProperties);
 
-        return new Font(fontName.name, fontFile, newProperties);
+        this.handler.send("commonobj", [
+          newProperties.loadedName+"_Desc",
+          "FontDescriptor",
+          descriptor._map,
+        ]);
+
+        const fontData = new Font(fontName.name, fontFile, newProperties); 
+
+        this.handler.send("commonobj", [
+          baseDict.loadedName+"_FontFile",
+          "FontFile",
+          {length1: length1, length2: length2, length3: length3, filter:fontFile.dict.get("Filter"), source: fontData.data}, //fontFile.buffer.slice(0, fontFile.bufferLength)
+        ]);
+        
+        return fontData;
       }
     );
   }

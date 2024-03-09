@@ -2946,6 +2946,18 @@ class WorkerTransport {
               this.commonObjs.resolve(id, font);
             });
           break;
+        case 'FontDescriptor':
+           this.commonObjs.resolve(id, exportedData);
+        break;
+        case 'FontFile':
+          this.commonObjs.resolve(id, exportedData);
+        break;
+        case 'BaseDict':
+          this.commonObjs.resolve(id, exportedData);
+        break;
+        case 'Encoding':
+          this.commonObjs.resolve(id, exportedData);
+        break;
         case "FontPath":
         case "Image":
         case "Pattern":
